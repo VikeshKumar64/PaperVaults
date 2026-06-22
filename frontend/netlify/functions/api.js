@@ -29,7 +29,7 @@ let isConnected = false;
 let gridFSBucket = null;
 
 const connectDB = async () => {
-  if (isConnected && mongoose.connection.readyState === 1) {
+  if (isConnected && mongoose.connection.readyState === 1 && gridFSBucket) {
     return;
   }
 
