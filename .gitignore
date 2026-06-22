@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Understand files (documentation notes - not for GitHub)
+understandFile.md
+understandFileBackend.md
+understandFileFrontend.md
+understandFileMongoDB.md
