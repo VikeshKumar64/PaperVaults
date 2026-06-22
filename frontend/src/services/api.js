@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const API = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
+  baseURL: '/api',
 });
 
 // Attach JWT token to every request if available
@@ -29,14 +29,9 @@ export const approvePaper = (id) => API.put(`/papers/${id}/approve`);
 export const rejectPaper = (id) => API.put(`/papers/${id}/reject`);
 export const deletePaper = (id) => API.delete(`/papers/${id}`);
 
-// PDF URLs
-export const getViewUrl = (id) => {
-  const base = import.meta.env.VITE_API_URL || '';
-  return `${base}/api/papers/${id}/view`;
-};
-export const getDownloadUrl = (id) => {
-  const base = import.meta.env.VITE_API_URL || '';
-  return `${base}/api/papers/${id}/download`;
-};
+// PDF URLs — In production, /api/* is redirected to /.netlify/functions/api/* via netlify.toml
+// In dev with netlify dev, the same redirect applies automatically
+export const getViewUrl = (id) => `/api/papers/${id}/view`;
+export const getDownloadUrl = (id) => `/api/papers/${id}/download`;
 
 export default API;

@@ -9,3 +9,6 @@ understandFile.md
 understandFileBackend.md
 understandFileFrontend.md
 understandFileMongoDB.md
+
+# Build output
+frontend/dist/
