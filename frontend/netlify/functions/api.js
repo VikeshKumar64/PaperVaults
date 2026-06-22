@@ -34,9 +34,7 @@ const connectDB = async () => {
   }
 
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000,
-    });
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
     isConnected = true;
     console.log(`MongoDB Connected: ${mongoose.connection.host || 'Atlas'}`);
 
@@ -481,6 +479,8 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================================
-// Export as Netlify Function
+// Export as Netlify Function & Vercel App
 // ============================================================
+module.exports = app;
 module.exports.handler = serverless(app);
+
