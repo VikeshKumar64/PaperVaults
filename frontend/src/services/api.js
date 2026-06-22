@@ -25,9 +25,12 @@ export const uploadPaper = (formData) =>
 
 // Papers - Admin
 export const getPendingPapers = () => API.get('/papers/pending');
+export const getAllPapers = () => API.get('/papers/all');
 export const approvePaper = (id) => API.put(`/papers/${id}/approve`);
 export const rejectPaper = (id) => API.put(`/papers/${id}/reject`);
+export const updatePaper = (id, data) => API.put(`/papers/${id}`, data);
 export const deletePaper = (id) => API.delete(`/papers/${id}`);
+
 
 // PDF URLs — In production, /api/* is redirected to /.netlify/functions/api/* via netlify.toml
 // In dev with netlify dev, the same redirect applies automatically

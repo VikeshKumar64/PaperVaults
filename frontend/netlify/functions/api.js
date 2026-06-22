@@ -288,7 +288,7 @@ app.get('/api/papers', async (req, res) => {
   }
 });
 
-// @desc    View PDF (buffer response — no streaming in serverless)
+// @desc    View PDF (stream)
 // @route   GET /api/papers/:id/view
 app.get('/api/papers/:id/view', async (req, res) => {
   try {
@@ -300,32 +300,26 @@ app.get('/api/papers/:id/view', async (req, res) => {
 
     const bucket = getGridFSBucket();
 
-    // In serverless, we collect the stream into a buffer
-    const chunks = [];
-    const downloadStream = bucket.openDownloadStream(paper.pdfFileId);
-
-    await new Promise((resolve, reject) => {
-      downloadStream.on('data', (chunk) => chunks.push(chunk));
-      downloadStream.on('error', (error) => {
-        console.error('PDF stream error:', error.message);
-        reject(error);
-      });
-      downloadStream.on('end', () => resolve());
-    });
-
-    const buffer = Buffer.concat(chunks);
-
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `inline; filename="${paper.pdfName}"`);
-    res.set('Content-Length', buffer.length);
-    res.send(buffer);
+
+    const downloadStream = bucket.openDownloadStream(paper.pdfFileId);
+
+    downloadStream.on('error', (error) => {
+      console.error('PDF stream error:', error.message);
+      if (!res.headersSent) {
+        res.status(404).json({ message: 'PDF file not found' });
+      }
+    });
+
+    downloadStream.pipe(res);
   } catch (error) {
     console.error('View PDF error:', error.message);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// @desc    Download PDF
+// @desc    Download PDF (stream)
 // @route   GET /api/papers/:id/download
 app.get('/api/papers/:id/download', async (req, res) => {
   try {
@@ -337,25 +331,19 @@ app.get('/api/papers/:id/download', async (req, res) => {
 
     const bucket = getGridFSBucket();
 
-    // Collect stream into buffer for serverless response
-    const chunks = [];
-    const downloadStream = bucket.openDownloadStream(paper.pdfFileId);
-
-    await new Promise((resolve, reject) => {
-      downloadStream.on('data', (chunk) => chunks.push(chunk));
-      downloadStream.on('error', (error) => {
-        console.error('PDF download error:', error.message);
-        reject(error);
-      });
-      downloadStream.on('end', () => resolve());
-    });
-
-    const buffer = Buffer.concat(chunks);
-
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `attachment; filename="${paper.pdfName}"`);
-    res.set('Content-Length', buffer.length);
-    res.send(buffer);
+
+    const downloadStream = bucket.openDownloadStream(paper.pdfFileId);
+
+    downloadStream.on('error', (error) => {
+      console.error('PDF download error:', error.message);
+      if (!res.headersSent) {
+        res.status(404).json({ message: 'PDF file not found' });
+      }
+    });
+
+    downloadStream.pipe(res);
   } catch (error) {
     console.error('Download PDF error:', error.message);
     res.status(500).json({ message: 'Server error' });
@@ -410,8 +398,6 @@ app.put('/api/papers/:id/approve', protect, async (req, res) => {
   }
 });
 
-// @desc    Reject a paper (Admin)
-// @route   PUT /api/papers/:id/reject
 app.put('/api/papers/:id/reject', protect, async (req, res) => {
   try {
     const paper = await Paper.findById(req.params.id);
@@ -426,6 +412,31 @@ app.put('/api/papers/:id/reject', protect, async (req, res) => {
     res.json({ message: 'Paper rejected', paper });
   } catch (error) {
     console.error('Reject error:', error.message);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @desc    Update a paper (Admin)
+// @route   PUT /api/papers/:id
+app.put('/api/papers/:id', protect, async (req, res) => {
+  try {
+    const { department, subjectName, semester, examType, year } = req.body;
+
+    const paper = await Paper.findById(req.params.id);
+    if (!paper) {
+      return res.status(404).json({ message: 'Paper not found' });
+    }
+
+    if (department) paper.department = department;
+    if (subjectName) paper.subjectName = subjectName;
+    if (semester) paper.semester = Number(semester);
+    if (examType) paper.examType = examType;
+    if (year) paper.year = Number(year);
+
+    await paper.save();
+    res.json({ message: 'Paper updated successfully', paper });
+  } catch (error) {
+    console.error('Update paper error:', error.message);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -482,5 +493,7 @@ app.use((err, req, res, next) => {
 // Export as Netlify Function & Vercel App
 // ============================================================
 module.exports = app;
-module.exports.handler = serverless(app);
+module.exports.handler = serverless(app, {
+  binary: ['application/pdf']
+});
 
