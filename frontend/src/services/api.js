@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const API = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_URL || '/api',
 });
 
 // Attach JWT token to every request if available
@@ -30,7 +30,13 @@ export const rejectPaper = (id) => API.put(`/papers/${id}/reject`);
 export const deletePaper = (id) => API.delete(`/papers/${id}`);
 
 // PDF URLs
-export const getViewUrl = (id) => `/api/papers/${id}/view`;
-export const getDownloadUrl = (id) => `/api/papers/${id}/download`;
+export const getViewUrl = (id) => {
+  const base = import.meta.env.VITE_API_URL || '';
+  return `${base}/api/papers/${id}/view`;
+};
+export const getDownloadUrl = (id) => {
+  const base = import.meta.env.VITE_API_URL || '';
+  return `${base}/api/papers/${id}/download`;
+};
 
 export default API;
