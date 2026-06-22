@@ -12,3 +12,6 @@ understandFileMongoDB.md
 
 # Build output
 frontend/dist/
+
+# Local Netlify folder
+.netlify

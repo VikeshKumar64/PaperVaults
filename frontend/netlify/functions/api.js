@@ -6,7 +6,14 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { Readable } = require('stream');
 
+// Sanitize environment variables (remove trailing carriage returns \r on Windows)
+if (process.env.MONGODB_URI) process.env.MONGODB_URI = process.env.MONGODB_URI.trim();
+if (process.env.JWT_SECRET) process.env.JWT_SECRET = process.env.JWT_SECRET.trim();
+if (process.env.ADMIN_EMAIL) process.env.ADMIN_EMAIL = process.env.ADMIN_EMAIL.trim();
+if (process.env.ADMIN_PASSWORD) process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD.trim();
+
 // ============================================================
+
 // Express App Setup
 // ============================================================
 const app = express();
@@ -27,16 +34,12 @@ const connectDB = async () => {
   }
 
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      tls: true,
-      tlsAllowInvalidCertificates: true,
-    });
-
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
     isConnected = true;
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
+    console.log(`MongoDB Connected: ${mongoose.connection.host || 'Atlas'}`);
 
     // Initialize GridFS bucket
-    gridFSBucket = new mongoose.mongo.GridFSBucket(conn.connection.db, {
+    gridFSBucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
       bucketName: 'papers',
     });
 
