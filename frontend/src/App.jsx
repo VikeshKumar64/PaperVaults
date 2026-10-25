@@ -6,6 +6,7 @@ import BrowsePapers from './pages/BrowsePapers';
 import UploadPaper from './pages/UploadPaper';
 import AdminLogin from './pages/AdminLogin';
 import AdminDashboard from './pages/AdminDashboard';
+import ExamPaperGenerator from './pages/ExamPaperGenerator';
 
 const App = () => {
   return (
@@ -17,6 +18,7 @@ const App = () => {
             <Route path="/" element={<HomePage />} />
             <Route path="/papers" element={<BrowsePapers />} />
             <Route path="/upload" element={<UploadPaper />} />
+            <Route path="/generate-paper" element={<ExamPaperGenerator />} />
             <Route path="/admin/login" element={<AdminLogin />} />
             <Route
               path="/admin/dashboard"

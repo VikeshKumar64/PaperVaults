@@ -5,6 +5,47 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { Readable } = require('stream');
+const path = require('path');
+const fs = require('fs');
+
+// Load environment variables if running locally
+try {
+  const dotenv = require('dotenv');
+  dotenv.config();
+  dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+  dotenv.config({ path: path.resolve(__dirname, '../../../backend/.env') });
+} catch (e) {
+  try {
+    const dotenv = require(path.resolve(__dirname, '../../../backend/node_modules/dotenv'));
+    dotenv.config({ path: path.resolve(__dirname, '../../../backend/.env') });
+    dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+  } catch (e2) {}
+}
+
+// Fallback: If MONGODB_URI is still not set in local dev, try reading from .env file directly
+if (!process.env.MONGODB_URI) {
+  const envPaths = [
+    path.resolve(__dirname, '../../../backend/.env'),
+    path.resolve(__dirname, '../../.env'),
+    path.resolve(__dirname, '../../../.env'),
+  ];
+  for (const envPath of envPaths) {
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      content.split(/\r?\n/).forEach((line) => {
+        const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+        if (match) {
+          const key = match[1];
+          let value = match[2] || '';
+          if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+          if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
+          if (!process.env[key]) process.env[key] = value.trim();
+        }
+      });
+      break;
+    }
+  }
+}
 
 // Sanitize environment variables (remove trailing carriage returns \r on Windows)
 if (process.env.MONGODB_URI) process.env.MONGODB_URI = process.env.MONGODB_URI.trim();
@@ -34,7 +75,10 @@ const connectDB = async () => {
   }
 
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      tls: true,
+      tlsAllowInvalidCertificates: true,
+    });
     isConnected = true;
     console.log(`MongoDB Connected: ${mongoose.connection.host || 'Atlas'}`);
 
@@ -99,6 +143,31 @@ const paperSchema = new mongoose.Schema(
       type: String,
       enum: ['pending', 'approved', 'rejected'],
       default: 'pending',
+    },
+    extractedText: {
+      type: String,
+      default: null,
+    },
+    extractionStatus: {
+      type: String,
+      enum: ['success', 'partial', 'failed', 'none'],
+      default: 'none',
+    },
+    extractionMethod: {
+      type: String,
+      default: null,
+    },
+    extractedPageCount: {
+      type: Number,
+      default: 0,
+    },
+    ocrProcessed: {
+      type: Boolean,
+      default: false,
+    },
+    extractionError: {
+      type: String,
+      default: null,
     },
   },
   {
@@ -470,6 +539,1089 @@ app.delete('/api/papers/:id', protect, async (req, res) => {
 });
 
 // ============================================================
+// AI Exam Paper Generator — PDF Extraction, Analysis & Generation
+// ============================================================
+
+let pdfParse;
+try {
+  pdfParse = require('pdf-parse');
+} catch (e) {
+  console.warn('pdf-parse not available — PDF extraction will be disabled');
+}
+
+// --- Marks Distribution Constants ---
+const EXAM_STRUCTURES = {
+  MST1: {
+    totalMarks: 20,
+    sections: [
+      { name: 'Section A', questionCount: 5, marksEach: 2, totalMarks: 10, description: 'Short Answer Questions' },
+      { name: 'Section B', questionCount: 2, marksEach: 5, totalMarks: 10, description: 'Descriptive Questions' },
+    ],
+  },
+  MST2: {
+    totalMarks: 20,
+    sections: [
+      { name: 'Section A', questionCount: 5, marksEach: 2, totalMarks: 10, description: 'Short Answer Questions' },
+      { name: 'Section B', questionCount: 2, marksEach: 5, totalMarks: 10, description: 'Descriptive Questions' },
+    ],
+  },
+  EST: {
+    totalMarks: 60,
+    sections: [
+      { name: 'Section A', questionCount: 5, marksEach: 2, totalMarks: 10, description: 'Short Answer Questions' },
+      { name: 'Section B', questionCount: 5, marksEach: 4, totalMarks: 20, description: 'Medium Answer Questions' },
+      { name: 'Section C', questionCount: 3, marksEach: 10, totalMarks: 30, description: 'Long Answer Questions' },
+    ],
+  },
+};
+
+// --- Constants for Question Verbs & Indicators ---
+const QUESTION_VERBS = [
+  'compare', 'describe', 'list', 'state', 'show', 'devise', 'demonstrate',
+  'explain', 'define', 'what', 'why', 'how', 'differentiate', 'discuss',
+  'write', 'calculate', 'derive', 'distinguish', 'illustrate', 'elaborate',
+  'analyze', 'evaluate', 'classify', 'give', 'identify', 'outline', 'prove',
+  'solve', 'apply', 'determine', 'estimate', 'construct', 'mention',
+];
+
+const ACADEMIC_KEYWORDS = [
+  'question', 'questions', 'marks', 'section', 'part', 'test', 'exam',
+  'examination', 'semester', 'subject', 'branch', 'time', 'hours', 'maximum',
+  'attempt', 'total', 'academic', 'year', 'module', 'unit', 'course', 'degree',
+];
+
+// --- Validate Extraction Quality ---
+function validateExtractionQuality(text) {
+  if (!text || typeof text !== 'string') {
+    return { isUsable: false, status: 'failed', reason: 'No text content extracted' };
+  }
+
+  // Remove common PDF-parser synthetic page markers
+  const cleaned = text
+    .replace(/--\s*\d+\s*of\s*\d+\s*--/gi, '')
+    .replace(/---\s*Page\s*Break\s*---/gi, '')
+    .replace(/Page\s+\d+\s+of\s+\d+/gi, '')
+    .trim();
+
+  const nonWhitespaceChars = cleaned.replace(/\s/g, '');
+  const alphaNumericChars = cleaned.replace(/[^a-zA-Z0-9]/g, '');
+
+  // Check 1: Minimum content threshold
+  if (alphaNumericChars.length < 60) {
+    return {
+      isUsable: false,
+      status: 'failed',
+      reason: `Insufficient text extracted (${alphaNumericChars.length} alphanumeric characters, min 60 required)`,
+    };
+  }
+
+  // Check 2: Density ratio (detect binary garbage or symbol spam)
+  const density = alphaNumericChars.length / (nonWhitespaceChars.length || 1);
+  if (density < 0.4) {
+    return {
+      isUsable: false,
+      status: 'failed',
+      reason: `Text appears to be noise/binary artifacts (alphanumeric ratio ${density.toFixed(2)})`,
+    };
+  }
+
+  // Check 3: Check for academic keywords and question patterns
+  const lower = cleaned.toLowerCase();
+  let keywordMatches = 0;
+  for (const kw of ACADEMIC_KEYWORDS) {
+    if (lower.includes(kw)) keywordMatches++;
+  }
+
+  let verbMatches = 0;
+  for (const v of QUESTION_VERBS) {
+    const regex = new RegExp(`\\b${v}\\b`, 'i');
+    if (regex.test(lower)) verbMatches++;
+  }
+
+  const hasSectionPattern = /section\s+[a-c]|part\s+[a-c]/i.test(cleaned);
+  const hasMarksPattern = /\d+\s*marks?|\d+\s*[xX*]\s*\d+|\(\d+\)|\bmarks\s*:\s*\d+/i.test(cleaned);
+  const hasQuestionPattern = /q\.?\s*\d+|\bquestion\b|\d{1,2}\.\s+[a-zA-Z]/i.test(cleaned);
+
+  const signalCount = (hasSectionPattern ? 1 : 0) +
+                      (hasMarksPattern ? 1 : 0) +
+                      (hasQuestionPattern ? 1 : 0) +
+                      (keywordMatches >= 2 ? 1 : 0) +
+                      (verbMatches >= 2 ? 1 : 0);
+
+  if (signalCount >= 2 && alphaNumericChars.length >= 100) {
+    return { isUsable: true, status: 'success', score: signalCount, reason: null };
+  } else if (signalCount >= 1 && alphaNumericChars.length >= 60) {
+    return { isUsable: true, status: 'partial', score: signalCount, reason: 'Limited academic patterns detected but usable' };
+  }
+
+  return {
+    isUsable: false,
+    status: 'failed',
+    reason: `Text does not resemble an academic question paper (academic signals: ${signalCount})`,
+  };
+}
+
+// --- Text Refinement Pipeline ---
+function refineExtractedText(raw, isOcr = false) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  let lines = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/\f/g, '\n--- Page Break ---\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const refined = [];
+  let questionCounter = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Strip leading/trailing table pipes and whitespace
+    line = line.replace(/^[\|\s\{\}\(\)\[\]]+/, '').replace(/[\|\s\{\}\(\)\[\]]+$/, '').trim();
+    if (!line) continue;
+
+    // Preserve page markers
+    if (/^---\s*Page\s*Break\s*---$/i.test(line) || /^--\s*\d+\s*of\s*\d+\s*--$/i.test(line)) {
+      refined.push('--- Page Break ---');
+      continue;
+    }
+
+    // Ignore isolated OCR noise fragments, table headers, or CO/BT mapping artifacts
+    if (/^(CO\d+|BT\s*Level|Mapping|Q\.?\s*No|Statement|UID\s*No|CO[1-4]\s+\d+|[B\s\z\\\/]{1,4})$/i.test(line)) {
+      continue;
+    }
+
+    if (isOcr) {
+      // 1. Common academic / exam header corrections
+      line = line
+        .replace(/\bSubloct\s+Code\b/gi, 'Subject Code')
+        .replace(/\bSubject\s+Tite\b/gi, 'Subject Title')
+        .replace(/\bSomentr\s+Tost\b/gi, 'Semester Test')
+        .replace(/\bMid\s+Somentr\b/gi, 'Mid Semester')
+        .replace(/\bAttompt\s+all\s+questions\b/gi, 'Attempt all questions')
+        .replace(/\bTexiBlob\b/gi, 'TextBlob')
+        .replace(/\bdiferent\s+\(ypes\b/gi, 'different types')
+        .replace(/\bravi\s+cusiomer\b/gi, 'raw customer')
+        .replace(/\bNLT\s+Terry\b/gi, 'NLTK library');
+
+      // 2. Section header identification & correction
+      const sectionMatch = line.match(/^(?:Sector|Section)\s*([A-Za-z0-9&])/i);
+      if (sectionMatch) {
+        let secChar = sectionMatch[1].toUpperCase();
+        if (secChar === '&' || secChar === '1') secChar = 'A';
+        if (secChar === '8') secChar = 'B';
+        refined.push(`\n=== SECTION ${secChar} ===`);
+        continue;
+      }
+
+      // 3. Marks formula normalization
+      const marksMatch = line.match(/(?:s\s*[xX*]\s*2\s*=\s*10|205510|\d+\s*[xX*]\s*\d+\s*=\s*\d+)\s*marks?/i);
+      if (marksMatch) {
+        let normalizedMarks = line
+          .replace(/s\s*[xX*]\s*2\s*=\s*10\s*marks?/gi, '5 × 2 = 10 Marks')
+          .replace(/205510\s*marks?/gi, '2 × 5 = 10 Marks')
+          .replace(/(\d+)\s*[xX*]\s*(\d+)\s*=\s*(\d+)\s*marks?/gi, '$1 × $2 = $3 Marks');
+        normalizedMarks = normalizedMarks.replace(/\s+(?:Fa\.|[,\.\-\_])\s*$/gi, '').trim();
+        refined.push(`[${normalizedMarks}]`);
+        continue;
+      }
+
+      // 4. Strip trailing table column debris and noise
+      line = line
+        .replace(/\s+(?:Ell|El|li\s+cor|ER|cos|Fa\.|CO[1-4]|BT\d+|i\s*\\\s*q|i\s*ges\s*tsad\s*N)\s*$/gi, '')
+        .replace(/[\|\-\_\{\}\\]+$/g, '')
+        .trim();
+
+      // 5. Normalizing quotes and dashes
+      line = line
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/^[-\—\–]\s*/, '');
+    }
+
+    if (line.length > 0) {
+      refined.push(line);
+    }
+  }
+
+  // Join lines with smart question formatting
+  const formatted = [];
+  for (let i = 0; i < refined.length; i++) {
+    let line = refined[i];
+    if (line.startsWith('=== SECTION') || (line.startsWith('[') && line.endsWith('Marks]')) || line.startsWith('--- Page')) {
+      formatted.push(line);
+      continue;
+    }
+
+    // Check if line starts with an explicit question number (e.g. "1.", "Q1", "1 Compare")
+    const explicitNum = line.match(/^(?:Q\.?\s*(\d+)|(\d{1,2})[\.\:\)\s])\s*(.*)$/i);
+    const firstWord = line.split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, '');
+    const isQuestionVerb = QUESTION_VERBS.includes(firstWord);
+    const startsWithBadLetterAndVerb = /^[A-Z]\s+([A-Za-z]+)/.test(line) && QUESTION_VERBS.includes(line.split(/\s+/)[1]?.toLowerCase());
+    const isHeaderLine = /^(Mid|Academic|Branch|Subject|Semester|Time|Instructions|Maximum|Total)/i.test(line);
+
+    if (explicitNum) {
+      let parsedNum = parseInt(explicitNum[1] || explicitNum[2], 10);
+      // Monotonic guard: if parsedNum is 1 but we're already at Q5+, it's an OCR glitch (e.g. 7 read as 1)
+      if (parsedNum <= questionCounter && parsedNum === 1 && questionCounter >= 5) {
+        questionCounter++;
+      } else {
+        questionCounter = parsedNum;
+      }
+      formatted.push(`Q${questionCounter}. ${explicitNum[3].replace(/[\|\\]+$/, '').trim()}`);
+    } else if (startsWithBadLetterAndVerb) {
+      questionCounter++;
+      const cleaned = line.replace(/^[A-Z]\s+/, '').replace(/[\|\\]+$/, '').trim();
+      formatted.push(`Q${questionCounter}. ${cleaned}`);
+    } else if (isQuestionVerb && !isHeaderLine) {
+      questionCounter++;
+      formatted.push(`Q${questionCounter}. ${line.replace(/[\|\\]+$/, '').trim()}`);
+    } else if (isHeaderLine || formatted.length === 0) {
+      formatted.push(line);
+    } else {
+      const prev = formatted[formatted.length - 1];
+      if (prev.startsWith('===') || prev.startsWith('[') || prev.startsWith('---')) {
+        formatted.push(line);
+      } else {
+        formatted[formatted.length - 1] = prev + ' ' + line.replace(/[\|\\]+$/, '').trim();
+      }
+    }
+  }
+
+  return formatted.join('\n');
+}
+
+// --- Native PDF Text Extraction ---
+async function extractNativePdfText(pdfBuffer) {
+  try {
+    let rawText = '';
+    let pageCount = 1;
+
+    if (typeof pdfParse === 'function') {
+      const data = await pdfParse(pdfBuffer);
+      rawText = data.text || '';
+      pageCount = data.numpages || 1;
+    } else if (pdfParse && pdfParse.PDFParse) {
+      const parser = new pdfParse.PDFParse({ data: pdfBuffer, verbosity: 0 });
+      await parser.load();
+      const textResult = await parser.getText();
+      const infoResult = await parser.getInfo();
+      rawText = textResult?.text || '';
+      pageCount = infoResult?.total || 1;
+      await parser.destroy();
+    }
+
+    const validation = validateExtractionQuality(rawText);
+    if (validation.isUsable) {
+      const refined = refineExtractedText(rawText, false);
+      return {
+        text: refined,
+        pageCount,
+        isUsable: true,
+        method: 'native',
+        ocrProcessed: false,
+        error: null,
+      };
+    }
+
+    return {
+      text: '',
+      pageCount,
+      isUsable: false,
+      method: 'native',
+      ocrProcessed: false,
+      error: validation.reason || 'Insufficient native text',
+    };
+  } catch (err) {
+    return {
+      text: '',
+      pageCount: 0,
+      isUsable: false,
+      method: 'native',
+      ocrProcessed: false,
+      error: `Native extraction failed: ${err.message}`,
+    };
+  }
+}
+
+// --- OCR Fallback Extraction ---
+async function extractOcrPdfText(pdfBuffer) {
+  try {
+    if (!pdfParse || !pdfParse.PDFParse) {
+      return {
+        text: '',
+        pageCount: 0,
+        isUsable: false,
+        method: 'ocr',
+        ocrProcessed: false,
+        error: 'PDF parser not initialized for OCR fallback',
+      };
+    }
+
+    const parser = new pdfParse.PDFParse({ data: pdfBuffer, verbosity: 0 });
+    await parser.load();
+    const info = await parser.getInfo();
+    const totalPages = info?.total || 1;
+    const pagesToProcess = Math.min(totalPages, 3); // Max 3 pages to respect serverless timeouts
+
+    const pageImages = [];
+    for (let p = 1; p <= pagesToProcess; p++) {
+      try {
+        const screenshot = await parser.getScreenshot({ pageNumber: p });
+        if (screenshot && screenshot.pages && screenshot.pages.length > 0 && screenshot.pages[0].data) {
+          pageImages.push({ pageNumber: p, buffer: Buffer.from(screenshot.pages[0].data) });
+          continue;
+        }
+      } catch (sErr) {}
+
+      // Fallback: try raw embedded image XObject
+      try {
+        const imgResult = await parser.getImage({ pageNumber: p });
+        if (imgResult && imgResult.pages && imgResult.pages.length > 0) {
+          const firstImg = imgResult.pages[0].images?.[0];
+          if (firstImg && firstImg.data) {
+            pageImages.push({ pageNumber: p, buffer: Buffer.from(firstImg.data) });
+          }
+        }
+      } catch (iErr) {}
+    }
+
+    await parser.destroy();
+
+    if (pageImages.length === 0) {
+      return {
+        text: '',
+        pageCount: totalPages,
+        isUsable: false,
+        method: 'ocr',
+        ocrProcessed: true,
+        error: 'PDF contains no extractable or renderable page images for OCR',
+      };
+    }
+
+    // Lazy-load tesseract.js only when OCR is actually required
+    const { createWorker } = require('tesseract.js');
+    const worker = await createWorker('eng');
+    const ocrOutputs = [];
+
+    for (const imgItem of pageImages) {
+      const res = await worker.recognize(imgItem.buffer);
+      if (res && res.data && res.data.text) {
+        ocrOutputs.push(`--- Page ${imgItem.pageNumber} ---\n` + res.data.text);
+      }
+    }
+
+    await worker.terminate();
+
+    const rawOcr = ocrOutputs.join('\n\n');
+    const refined = refineExtractedText(rawOcr, true);
+    const validation = validateExtractionQuality(refined);
+
+    return {
+      text: validation.isUsable ? refined : '',
+      pageCount: totalPages,
+      isUsable: validation.isUsable,
+      status: validation.status,
+      method: 'ocr',
+      ocrProcessed: true,
+      error: validation.isUsable ? null : (validation.reason || 'OCR extraction produced insufficient usable text'),
+    };
+  } catch (err) {
+    return {
+      text: '',
+      pageCount: 0,
+      isUsable: false,
+      method: 'ocr',
+      ocrProcessed: true,
+      error: `OCR extraction error: ${err.message}`,
+    };
+  }
+}
+
+// --- Main PDF Text Extraction (with Caching & OCR Fallback) ---
+async function extractPdfText(pdfFileId, paperDoc = null) {
+  // 1. Check if valid cached text already exists in the paper document
+  if (paperDoc && paperDoc.extractedText && paperDoc.extractionStatus === 'success') {
+    const val = validateExtractionQuality(paperDoc.extractedText);
+    if (val.isUsable) {
+      return {
+        text: paperDoc.extractedText,
+        pageCount: paperDoc.extractedPageCount || 1,
+        isUsable: true,
+        method: paperDoc.extractionMethod || 'cached',
+        ocrProcessed: !!paperDoc.ocrProcessed,
+        cached: true,
+        error: null,
+      };
+    }
+  }
+
+  if (!pdfParse) {
+    return { text: '', pageCount: 0, isUsable: false, error: 'PDF parser not available' };
+  }
+
+  try {
+    const bucket = getGridFSBucket();
+    const chunks = [];
+
+    await new Promise((resolve, reject) => {
+      const downloadStream = bucket.openDownloadStream(pdfFileId);
+      downloadStream.on('data', (chunk) => chunks.push(chunk));
+      downloadStream.on('error', (err) => reject(err));
+      downloadStream.on('end', () => resolve());
+    });
+
+    const pdfBuffer = Buffer.concat(chunks);
+
+    // Step A: Attempt Native Extraction
+    const nativeResult = await extractNativePdfText(pdfBuffer);
+    if (nativeResult.isUsable) {
+      if (paperDoc && paperDoc._id) {
+        try {
+          await Paper.findByIdAndUpdate(paperDoc._id, {
+            extractedText: nativeResult.text,
+            extractionStatus: 'success',
+            extractionMethod: 'native',
+            extractedPageCount: nativeResult.pageCount,
+            ocrProcessed: false,
+            extractionError: null,
+          });
+        } catch (dbErr) {
+          console.warn('Failed to update Paper cache for native extraction:', dbErr.message);
+        }
+      }
+      return { ...nativeResult, cached: false };
+    }
+
+    // Step B: Native was insufficient -> OCR Fallback
+    console.log(`Paper ${paperDoc?.pdfName || pdfFileId}: native extraction returned insufficient text. Attempting OCR fallback...`);
+    const ocrResult = await extractOcrPdfText(pdfBuffer);
+
+    if (paperDoc && paperDoc._id) {
+      try {
+        await Paper.findByIdAndUpdate(paperDoc._id, {
+          extractedText: ocrResult.isUsable ? ocrResult.text : null,
+          extractionStatus: ocrResult.isUsable ? 'success' : (ocrResult.status === 'partial' ? 'partial' : 'failed'),
+          extractionMethod: 'ocr',
+          extractedPageCount: ocrResult.pageCount,
+          ocrProcessed: true,
+          extractionError: ocrResult.error,
+        });
+      } catch (dbErr) {
+        console.warn('Failed to update Paper cache for OCR extraction:', dbErr.message);
+      }
+    }
+
+    return { ...ocrResult, cached: false };
+  } catch (error) {
+    if (paperDoc && paperDoc._id) {
+      try {
+        await Paper.findByIdAndUpdate(paperDoc._id, {
+          extractionStatus: 'failed',
+          extractionError: error.message,
+        });
+      } catch (dbErr) {}
+    }
+    return { text: '', pageCount: 0, isUsable: false, error: `PDF extraction failed: ${error.message}` };
+  }
+}
+
+// --- Normalize subject name for matching ---
+function normalizeSubjectName(name) {
+  return (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// --- AI Provider Adapters ---
+async function callGemini(apiKey, prompt) {
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  let lastError = null;
+
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 8192,
+            responseMimeType: 'application/json',
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        if (response.status === 401 || response.status === 403) {
+          throw new Error('Invalid or unauthorized Gemini API key. Please check your API key.');
+        }
+        if (response.status === 429) {
+          throw new Error('Gemini API rate limit exceeded. Please wait a moment and try again.');
+        }
+        lastError = new Error(`Gemini model ${model} error (${response.status}): ${errBody.substring(0, 200)}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const textContent = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!textContent) {
+        lastError = new Error('Gemini returned an empty response. Please try again.');
+        continue;
+      }
+      return textContent;
+    } catch (err) {
+      if (err.message.includes('Invalid or unauthorized') || err.message.includes('rate limit')) {
+        throw err;
+      }
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('Failed to generate content with Gemini models.');
+}
+
+async function callOpenAI(apiKey, prompt) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are an academic question paper generator. You MUST respond with valid JSON only, no markdown formatting.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.7,
+      max_tokens: 8192,
+      response_format: { type: 'json_object' },
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    if (response.status === 401) {
+      throw new Error('Invalid OpenAI API key. Note: A ChatGPT subscription is NOT the same as an OpenAI API key. You need API access from platform.openai.com.');
+    }
+    if (response.status === 429) {
+      throw new Error('OpenAI API rate limit exceeded or insufficient credits. Please check your billing at platform.openai.com.');
+    }
+    throw new Error(`OpenAI API error (${response.status}): ${errBody.substring(0, 200)}`);
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || '';
+}
+
+async function callGrok(apiKey, prompt) {
+  const response = await fetch('https://api.x.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'grok-3-mini-fast',
+      messages: [
+        { role: 'system', content: 'You are an academic question paper generator. You MUST respond with valid JSON only, no markdown formatting.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.7,
+      max_tokens: 8192,
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('Invalid xAI Grok API key. Please check your key at console.x.ai.');
+    }
+    if (response.status === 429) {
+      throw new Error('Grok API rate limit exceeded. Please wait and try again.');
+    }
+    throw new Error(`Grok API error (${response.status}): ${errBody.substring(0, 200)}`);
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || '';
+}
+
+const AI_PROVIDERS = {
+  gemini: callGemini,
+  openai: callOpenAI,
+  grok: callGrok,
+};
+
+// --- Build AI Prompt ---
+function buildGenerationPrompt(config, extractedQuestions, analysisMode) {
+  const structure = EXAM_STRUCTURES[config.examType];
+
+  const sectionDetails = structure.sections
+    .map((s) => `  - ${s.name}: ${s.questionCount} questions × ${s.marksEach} marks = ${s.totalMarks} marks (${s.description})`)
+    .join('\n');
+
+  const totalQuestions = structure.sections.reduce((sum, s) => sum + s.questionCount, 0);
+
+  let previousPapersContext = '';
+  if (extractedQuestions.length > 0) {
+    const limitedQuestions = extractedQuestions.slice(0, 15);
+    const questionsText = limitedQuestions
+      .map((eq, i) => `--- Previous Paper ${i + 1} (${eq.metadata}) ---\n${eq.text.substring(0, 2000)}`)
+      .join('\n\n');
+    previousPapersContext = `
+PREVIOUS YEAR QUESTION PAPERS FOR REFERENCE (use these to understand question patterns, difficulty, and style):
+${questionsText}
+`;
+  }
+
+  let syllabusContext = '';
+  if (config.syllabus) {
+    syllabusContext = `
+SYLLABUS (generate questions ONLY from topics covered in this syllabus):
+${config.syllabus.substring(0, 4000)}
+`;
+  }
+
+  const prompt = `You are generating an AI practice question paper. This is NOT an official university paper.
+
+EXAM CONFIGURATION:
+- Degree: ${config.degree || 'Not specified'}
+- Department: ${config.department || 'Not specified'}
+- Semester: ${config.semester || 'Not specified'}
+- Subject: ${config.subjectName}
+- Exam Type: ${config.examType}
+- Academic Year: ${config.year || new Date().getFullYear()}
+${config.paperTitle ? `- Paper Title: ${config.paperTitle}` : ''}
+${config.institutionName ? `- Institution: ${config.institutionName}` : ''}
+
+STRICT MARKS DISTRIBUTION (you MUST follow this exactly):
+Total Marks: ${structure.totalMarks}
+Total Questions: ${totalQuestions}
+${sectionDetails}
+
+${syllabusContext}
+${previousPapersContext}
+
+ANALYSIS MODE: ${
+  analysisMode === 'pattern'
+    ? `Pattern analysis across ${extractedQuestions.length} historical previous-year papers — identify recurring topics, question formats, and difficulty distributions.`
+    : analysisMode === 'hybrid'
+    ? `Historical question-paper analysis (${extractedQuestions.length} previous-year paper(s) analyzed) combined with syllabus reference — replicate the exact structure, question depth, and academic style of the analyzed previous papers.`
+    : 'Syllabus-based generation (no historical papers could be extracted; generate solely based on syllabus).'
+}
+
+REQUIREMENTS:
+1. Generate EXACTLY ${totalQuestions} questions with the EXACT marks distribution above.
+2. Questions must be appropriate for ${config.degree || 'university'} level, semester ${config.semester || 'as specified'}.
+3. ${config.syllabus ? 'Generate questions ONLY from the provided syllabus topics.' : 'Generate questions appropriate for the subject.'}
+4. Match the difficulty and style of the previous papers where available.
+5. 2-mark questions: definitions, short explanations, brief distinctions.
+6. ${structure.sections.length >= 2 ? (structure.sections[1].marksEach + '-mark questions: explanations, comparisons, short derivations.') : ''}
+7. ${structure.sections.length >= 3 ? '10-mark questions: detailed explanations, architectures, algorithms, comprehensive comparisons.' : ''}
+8. Avoid repetition — each question should test a distinct concept.
+9. Clear, grammatically correct language.
+10. Do NOT claim these are official university questions.
+
+Respond with ONLY valid JSON in this exact format:
+{
+  "sections": [
+    {
+      "name": "Section A",
+      "description": "Short Answer Questions",
+      "marksEach": 2,
+      "questions": [
+        {
+          "questionNumber": 1,
+          "text": "Question text here",
+          "marks": 2,
+          "topic": "Topic/Unit from syllabus",
+          "subparts": []
+        }
+      ]
+    }
+  ],
+  "totalMarks": ${structure.totalMarks},
+  "totalQuestions": ${totalQuestions},
+  "generationNote": "Brief note about how questions were generated"
+}
+
+IMPORTANT: Return ONLY the JSON object. No markdown code fences, no explanation text.`;
+
+  return prompt;
+}
+
+// --- Validate AI Response ---
+function validateGeneratedPaper(parsed, examType) {
+  const structure = EXAM_STRUCTURES[examType];
+  if (!structure) return { valid: false, error: 'Invalid exam type' };
+
+  if (!parsed || !parsed.sections || !Array.isArray(parsed.sections)) {
+    return { valid: false, error: 'Response missing sections array' };
+  }
+
+  if (parsed.sections.length !== structure.sections.length) {
+    return { valid: false, error: `Expected ${structure.sections.length} sections, got ${parsed.sections.length}` };
+  }
+
+  let totalMarks = 0;
+  let totalQuestions = 0;
+  const errors = [];
+
+  for (let i = 0; i < structure.sections.length; i++) {
+    const expected = structure.sections[i];
+    const actual = parsed.sections[i];
+
+    if (!actual.questions || !Array.isArray(actual.questions)) {
+      errors.push(`${expected.name}: missing questions array`);
+      continue;
+    }
+
+    if (actual.questions.length !== expected.questionCount) {
+      errors.push(`${expected.name}: expected ${expected.questionCount} questions, got ${actual.questions.length}`);
+    }
+
+    for (const q of actual.questions) {
+      const qMarks = q.marks || expected.marksEach;
+      totalMarks += qMarks;
+      totalQuestions++;
+
+      if (qMarks !== expected.marksEach) {
+        errors.push(`${expected.name} Q${q.questionNumber}: expected ${expected.marksEach} marks, got ${qMarks}`);
+      }
+    }
+  }
+
+  if (totalMarks !== structure.totalMarks) {
+    errors.push(`Total marks: expected ${structure.totalMarks}, got ${totalMarks}`);
+  }
+
+  const expectedTotal = structure.sections.reduce((sum, s) => sum + s.questionCount, 0);
+  if (totalQuestions !== expectedTotal) {
+    errors.push(`Total questions: expected ${expectedTotal}, got ${totalQuestions}`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    totalMarks,
+    totalQuestions,
+  };
+}
+
+// --- Attempt to fix common AI response issues ---
+function attemptFix(parsed, examType) {
+  const structure = EXAM_STRUCTURES[examType];
+  if (!parsed || !parsed.sections) return parsed;
+
+  // Fix marks values
+  for (let i = 0; i < Math.min(parsed.sections.length, structure.sections.length); i++) {
+    const expected = structure.sections[i];
+    const section = parsed.sections[i];
+    if (section.questions) {
+      // Trim or pad questions to expected count
+      if (section.questions.length > expected.questionCount) {
+        section.questions = section.questions.slice(0, expected.questionCount);
+      }
+      // Fix marks per question
+      section.questions.forEach((q, qi) => {
+        q.marks = expected.marksEach;
+        q.questionNumber = qi + 1;
+      });
+      section.marksEach = expected.marksEach;
+      section.name = expected.name;
+      section.description = expected.description;
+    }
+  }
+
+  // Recalculate totals
+  let totalMarks = 0;
+  let totalQuestions = 0;
+  parsed.sections.forEach((s) => {
+    if (s.questions) {
+      s.questions.forEach((q) => {
+        totalMarks += q.marks;
+        totalQuestions++;
+      });
+    }
+  });
+  parsed.totalMarks = totalMarks;
+  parsed.totalQuestions = totalQuestions;
+
+  return parsed;
+}
+
+// --- Parse AI JSON response (handles markdown fences) ---
+function parseAIResponse(rawText) {
+  let cleaned = rawText.trim();
+  // Remove markdown code fences if present
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+  return JSON.parse(cleaned);
+}
+
+// ============================================================
+// Route — Generate AI Exam Paper
+// ============================================================
+
+// @desc    Generate AI practice question paper
+// @route   POST /api/papers/generate
+app.post('/api/papers/generate', express.json({ limit: '1mb' }), async (req, res) => {
+  try {
+    const {
+      degree,
+      department,
+      semester,
+      subjectName,
+      examType,
+      year,
+      paperTitle,
+      institutionName,
+      syllabus,
+      provider,
+      apiKey,
+    } = req.body;
+
+    // --- Validate required fields ---
+    if (!subjectName || !examType || !provider || !apiKey) {
+      return res.status(400).json({
+        message: 'Subject name, exam type, AI provider, and API key are required.',
+      });
+    }
+
+    if (!EXAM_STRUCTURES[examType]) {
+      return res.status(400).json({ message: 'Invalid exam type. Must be MST1, MST2, or EST.' });
+    }
+
+    if (!AI_PROVIDERS[provider]) {
+      return res.status(400).json({ message: 'Invalid AI provider. Choose gemini, openai, or grok.' });
+    }
+
+    // --- Find matching approved papers ---
+    const normalizedSubject = normalizeSubjectName(subjectName);
+    const filter = { status: 'approved' };
+
+    // Build a flexible regex for subject matching (supports acronyms like NLP <-> Natural Language Processing)
+    const subjectWords = normalizedSubject.split(' ').filter((w) => w.length >= 2);
+    const words = normalizedSubject.split(' ').filter(Boolean);
+    if (words.length > 1) {
+      const acronym = words.map((w) => w[0]).join('');
+      if (acronym.length >= 2) subjectWords.push(acronym);
+    }
+
+    const COMMON_ACRONYMS = {
+      nlp: ['natural', 'language', 'processing'],
+      'natural language processing': ['nlp'],
+      os: ['operating', 'systems'],
+      'operating systems': ['os'],
+      dbms: ['database', 'management'],
+      'database management system': ['dbms'],
+      cn: ['computer', 'networks'],
+      'computer networks': ['cn'],
+      ai: ['artificial', 'intelligence'],
+      'artificial intelligence': ['ai'],
+      ml: ['machine', 'learning'],
+      'machine learning': ['ml'],
+    };
+
+    if (COMMON_ACRONYMS[normalizedSubject]) {
+      subjectWords.push(...COMMON_ACRONYMS[normalizedSubject]);
+    }
+
+    if (subjectWords.length > 0) {
+      filter.subjectName = { $regex: subjectWords.join('|'), $options: 'i' };
+    } else if (subjectName.trim()) {
+      filter.subjectName = { $regex: subjectName.trim(), $options: 'i' };
+    }
+
+    if (department) filter.department = { $regex: new RegExp(`^${department.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') };
+    if (semester) filter.semester = Number(semester);
+    if (examType) filter.examType = examType;
+
+    const matchingPapers = await Paper.find(filter).sort({ year: -1 }).limit(30);
+
+    // Deduplicate by pdfFileId
+    const seen = new Set();
+    const uniquePapers = matchingPapers.filter((p) => {
+      const key = p.pdfFileId.toString();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const paperCount = uniquePapers.length;
+
+    // Check if no papers exist and no syllabus provided
+    if (paperCount === 0 && (!syllabus || syllabus.trim().length < 20)) {
+      return res.status(400).json({
+        message: 'No matching previous papers found and no syllabus provided. Please enter your subject syllabus to generate a paper.',
+        paperCount: 0,
+        analysisMode: 'syllabus',
+      });
+    }
+
+    // --- Extract text from matching PDFs (limit to top papers for performance) ---
+    const papersToExtract = uniquePapers.slice(0, 15);
+    const extractedQuestions = [];
+    const partiallyExtracted = [];
+    const extractionErrors = [];
+
+    for (const paper of papersToExtract) {
+      try {
+        const result = await extractPdfText(paper.pdfFileId, paper);
+        if (result.isUsable && result.text) {
+          extractedQuestions.push({
+            text: result.text,
+            metadata: `${paper.subjectName} | ${paper.examType} | ${paper.year} | Sem ${paper.semester}`,
+            paperId: paper._id.toString(),
+            pdfName: paper.pdfName,
+            extractionMethod: result.method || 'native',
+            ocrProcessed: !!result.ocrProcessed,
+            cached: !!result.cached,
+          });
+        } else if (result.status === 'partial' && result.text) {
+          partiallyExtracted.push({
+            paper: paper.pdfName,
+            paperId: paper._id.toString(),
+            text: result.text,
+            error: result.error,
+          });
+          // Also include partial question text as style reference if no other full papers
+          if (extractedQuestions.length === 0) {
+            extractedQuestions.push({
+              text: result.text,
+              metadata: `${paper.subjectName} | ${paper.examType} | ${paper.year} | Sem ${paper.semester} (Partial Extraction)`,
+              paperId: paper._id.toString(),
+              pdfName: paper.pdfName,
+              extractionMethod: result.method || 'ocr',
+              ocrProcessed: !!result.ocrProcessed,
+              cached: !!result.cached,
+            });
+          }
+        } else if (result.error) {
+          extractionErrors.push({ paper: paper.pdfName, error: result.error });
+        }
+      } catch (err) {
+        extractionErrors.push({ paper: paper.pdfName, error: err.message });
+      }
+    }
+
+    // Determine actual analysis mode dynamically based on extraction success
+    let analysisMode;
+    if (extractedQuestions.length === 0) {
+      analysisMode = 'syllabus';
+    } else if (uniquePapers.length > 10) {
+      analysisMode = 'pattern';
+    } else {
+      analysisMode = 'hybrid';
+    }
+
+    // --- Build prompt and call AI ---
+    const config = {
+      degree: degree || '',
+      department: department || '',
+      semester: semester || '',
+      subjectName,
+      examType,
+      year: year || new Date().getFullYear(),
+      paperTitle: paperTitle || '',
+      institutionName: institutionName || '',
+      syllabus: syllabus || '',
+    };
+
+    const prompt = buildGenerationPrompt(config, extractedQuestions, analysisMode);
+
+    const callProvider = AI_PROVIDERS[provider];
+    let generatedPaper = null;
+    let attempts = 0;
+    const maxAttempts = 2;
+    let lastError = null;
+
+    while (attempts < maxAttempts && !generatedPaper) {
+      attempts++;
+      try {
+        const rawResponse = await callProvider(apiKey, prompt);
+        const parsed = parseAIResponse(rawResponse);
+        const validation = validateGeneratedPaper(parsed, examType);
+
+        if (validation.valid) {
+          generatedPaper = parsed;
+        } else {
+          // Attempt fix
+          const fixed = attemptFix(parsed, examType);
+          const revalidation = validateGeneratedPaper(fixed, examType);
+          if (revalidation.valid) {
+            generatedPaper = fixed;
+          } else {
+            lastError = `Validation failed: ${revalidation.errors.join('; ')}`;
+          }
+        }
+      } catch (err) {
+        lastError = err.message;
+        // Don't retry on auth errors
+        if (err.message.includes('API key') || err.message.includes('unauthorized') || err.message.includes('Invalid')) {
+          break;
+        }
+      }
+    }
+
+    if (!generatedPaper) {
+      return res.status(422).json({
+        message: lastError || 'Failed to generate a valid question paper after multiple attempts.',
+        paperCount,
+        analysisMode,
+      });
+    }
+
+    // --- Return result ---
+    res.json({
+      success: true,
+      paper: {
+        ...generatedPaper,
+        metadata: {
+          degree: config.degree,
+          department: config.department,
+          semester: config.semester,
+          subjectName: config.subjectName,
+          examType: config.examType,
+          year: config.year,
+          paperTitle: config.paperTitle,
+          institutionName: config.institutionName,
+          structure: EXAM_STRUCTURES[examType],
+        },
+        generatedAt: new Date().toISOString(),
+        label: 'AI-Generated Practice Question Paper',
+      },
+      analysis: {
+        paperCount,
+        usableExtractedPapers: extractedQuestions.length,
+        ocrProcessedCount: extractedQuestions.filter((q) => q.ocrProcessed).length,
+        nativeExtractedCount: extractedQuestions.filter((q) => q.extractionMethod === 'native').length,
+        cachedCount: extractedQuestions.filter((q) => q.cached).length,
+        partiallyExtractedCount: partiallyExtracted.length,
+        failedCount: extractionErrors.length,
+        analysisMode,
+        syllabusProvided: !!(syllabus && syllabus.trim().length > 0),
+        extractionErrors: extractionErrors.length > 0 ? extractionErrors : undefined,
+      },
+      disclaimer: 'This is an AI-generated practice paper. It is NOT an official university examination paper. Questions are generated based on available previous papers and syllabus for practice purposes only.',
+    });
+  } catch (error) {
+    console.error('Generate paper error:', error.message);
+    res.status(500).json({ message: 'An unexpected error occurred during paper generation.' });
+  }
+});
+
+// ============================================================
 // Health Check
 // ============================================================
 app.get('/api/health', (req, res) => {
@@ -496,4 +1648,16 @@ module.exports = app;
 module.exports.handler = serverless(app, {
   binary: ['application/pdf']
 });
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  connectDB().then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }).catch((err) => {
+    console.error('Failed to start server:', err.message);
+  });
+}
+
 

@@ -40,6 +40,31 @@ const paperSchema = new mongoose.Schema(
       enum: ['pending', 'approved', 'rejected'],
       default: 'pending',
     },
+    extractedText: {
+      type: String,
+      default: null,
+    },
+    extractionStatus: {
+      type: String,
+      enum: ['success', 'partial', 'failed', 'none'],
+      default: 'none',
+    },
+    extractionMethod: {
+      type: String,
+      default: null,
+    },
+    extractedPageCount: {
+      type: Number,
+      default: 0,
+    },
+    ocrProcessed: {
+      type: Boolean,
+      default: false,
+    },
+    extractionError: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,

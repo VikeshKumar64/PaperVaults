@@ -15,3 +15,9 @@ frontend/dist/
 
 # Local Netlify folder
 .netlify
+
+# OCR and temporary test assets
+*.traineddata
+test_nlp_sem3.pdf
+page_1_screenshot.png
+

@@ -31,6 +31,10 @@ export const rejectPaper = (id) => API.put(`/papers/${id}/reject`);
 export const updatePaper = (id, data) => API.put(`/papers/${id}`, data);
 export const deletePaper = (id) => API.delete(`/papers/${id}`);
 
+// AI Paper Generator
+export const generatePaper = (data) =>
+  API.post('/papers/generate', data, { timeout: 90000 });
+
 
 // PDF URLs — In production, /api/* is redirected to /.netlify/functions/api/* via netlify.toml
 // In dev with netlify dev, the same redirect applies automatically

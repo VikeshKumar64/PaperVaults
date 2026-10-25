@@ -12,9 +12,8 @@ export default defineConfig({
     // with `npx netlify functions:serve` and proxy to it:
     proxy: {
       '/api': {
-        target: 'http://localhost:9999/.netlify/functions/api',
+        target: process.env.VITE_API_URL || 'http://localhost:5000',
         changeOrigin: true,
-        rewrite: (path) => path,
       },
     },
   },

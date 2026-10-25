@@ -28,9 +28,15 @@ const HomePage = () => {
           >
             Upload a Paper
           </Link>
+          <Link
+            to="/generate-paper"
+            className="bg-indigo-600 text-white px-6 py-3 rounded-lg text-lg hover:bg-indigo-700 transition-colors"
+          >
+            🎯 AI Paper Generator
+          </Link>
         </div>
 
-        <div className="mt-12 grid grid-cols-1 sm:grid-cols-3 gap-6 text-left">
+        <div className="mt-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 text-left">
           <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
             <h3 className="font-semibold text-gray-800 mb-2">🔍 Find Papers</h3>
             <p className="text-sm text-gray-600">
@@ -47,6 +53,13 @@ const HomePage = () => {
             <h3 className="font-semibold text-gray-800 mb-2">✅ Quality Checked</h3>
             <p className="text-sm text-gray-600">
               Every paper is reviewed by admin before it goes public.
+            </p>
+          </div>
+          <div className="bg-white p-6 rounded-lg shadow-sm border border-indigo-200 relative overflow-hidden">
+            <div className="absolute top-0 right-0 bg-indigo-500 text-white text-xs px-2 py-0.5 rounded-bl font-medium">NEW</div>
+            <h3 className="font-semibold text-gray-800 mb-2">🎯 AI Paper Generator</h3>
+            <p className="text-sm text-gray-600">
+              Generate practice papers using AI based on previous papers and your syllabus.
             </p>
           </div>
         </div>

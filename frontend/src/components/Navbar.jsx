@@ -34,6 +34,9 @@ const Navbar = () => {
             <Link to="/upload" className="text-gray-600 hover:text-blue-600">
               Upload Paper
             </Link>
+            <Link to="/generate-paper" className="text-gray-600 hover:text-blue-600">
+              AI Generator
+            </Link>
             {isLoggedIn ? (
               <>
                 <Link to="/admin/dashboard" className="text-gray-600 hover:text-blue-600">
@@ -82,6 +85,9 @@ const Navbar = () => {
             </Link>
             <Link to="/upload" className="block py-2 text-gray-600 hover:text-blue-600" onClick={closeMenu}>
               Upload Paper
+            </Link>
+            <Link to="/generate-paper" className="block py-2 text-gray-600 hover:text-blue-600" onClick={closeMenu}>
+              AI Generator
             </Link>
             {isLoggedIn ? (
               <>
