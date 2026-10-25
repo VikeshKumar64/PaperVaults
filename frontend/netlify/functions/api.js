@@ -78,6 +78,8 @@ const connectDB = async () => {
     const conn = await mongoose.connect(process.env.MONGODB_URI, {
       tls: true,
       tlsAllowInvalidCertificates: true,
+      serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 5000,
     });
     isConnected = true;
     console.log(`MongoDB Connected: ${mongoose.connection.host || 'Atlas'}`);
@@ -881,17 +883,19 @@ function extractEmbeddedPageImages(pdfBuffer) {
 async function ocrImageWithGemini(apiKey, imgBuffer) {
   const base64Data = imgBuffer.toString('base64');
   const models = [
-    'gemini-3.8-flash',
-    'gemini-3.5-flash',
-    'gemini-flash-latest',
     'gemini-3.5-flash-lite',
     'gemini-flash-lite-latest',
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
     'gemini-2.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash'
   ];
   for (const m of models) {
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5500);
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -903,8 +907,10 @@ async function ocrImageWithGemini(apiKey, imgBuffer) {
             ]
           }],
           generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
-        })
+        }),
+        signal: controller.signal
       });
+      clearTimeout(timer);
       if (res.ok) {
         const data = await res.json();
         const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -1209,20 +1215,28 @@ function normalizeSubjectName(name) {
 // --- AI Provider Adapters ---
 async function callGemini(apiKey, prompt) {
   const models = [
-    'gemini-3.8-flash',
-    'gemini-3.5-flash',
-    'gemini-flash-latest',
     'gemini-3.5-flash-lite',
     'gemini-flash-lite-latest',
-    'gemini-pro-latest',
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
     'gemini-2.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash'
   ];
   let lastError = null;
+  const deadline = Date.now() + 22000; // 22s hard deadline to prevent lambda 30s timeout
 
   for (const model of models) {
+    if (Date.now() >= deadline) {
+      console.warn('Approaching serverless timeout budget, aborting further model fallbacks.');
+      break;
+    }
+
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6500);
+
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -1235,14 +1249,16 @@ async function callGemini(apiKey, prompt) {
             responseMimeType: 'application/json',
           },
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
 
       if (!response.ok) {
-        const errBody = await response.text();
         if (response.status === 401 || response.status === 403) {
           throw new Error('Invalid or unauthorized Gemini API key. Please check your API key.');
         }
-        lastError = new Error(`Gemini model ${model} error (${response.status}): ${errBody.substring(0, 200)}`);
+        // Fail fast on high demand or rate limits to move to next model immediately
+        lastError = new Error(`Gemini model ${model} returned HTTP ${response.status}`);
         continue;
       }
 
@@ -1254,6 +1270,7 @@ async function callGemini(apiKey, prompt) {
       }
       return textContent;
     } catch (err) {
+      clearTimeout(timer);
       if (err.message.includes('Invalid or unauthorized')) {
         throw err;
       }
@@ -1261,7 +1278,7 @@ async function callGemini(apiKey, prompt) {
     }
   }
 
-  throw lastError || new Error('Failed to generate content with Gemini models.');
+  throw lastError || new Error('Failed to generate content with Gemini models within time limit.');
 }
 
 async function callOpenAI(apiKey, prompt) {

@@ -7,6 +7,7 @@
   node_bundler = "esbuild"
   external_node_modules = ["tesseract.js", "pdf-parse"]
   included_files = []
+  timeout = 26
 
 # Redirect /api/* to the serverless function
 [[redirects]]

@@ -41,11 +41,15 @@ const ExamPaperGenerator = () => {
         setError(data.message || 'Generation failed. Please try again.');
       }
     } catch (err) {
-      const msg =
-        err.response?.data?.message ||
-        err.message ||
-        'An unexpected error occurred. Please check your API key and try again.';
-      setError(msg);
+      if (err.response?.status === 502 || err.message?.includes('502') || err.message?.includes('timeout') || err.message?.includes('Network Error')) {
+        setError('The upstream AI model took longer than expected due to peak traffic. Please click "Generate Paper" again — high-speed fallback will process your paper immediately.');
+      } else {
+        const msg =
+          err.response?.data?.message ||
+          err.message ||
+          'An unexpected error occurred. Please check your API key and try again.';
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
