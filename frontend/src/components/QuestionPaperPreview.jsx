@@ -240,42 +240,76 @@ const QuestionPaperPreview = ({ data, onRegenerate }) => {
 
       {/* Analysis Summary */}
       {analysis && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-          <h4 className="font-medium text-gray-700 text-sm mb-2">📊 Analysis Summary</h4>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-            <div className="bg-blue-50 rounded-lg p-2">
-              <p className="text-lg font-bold text-blue-700">{analysis.paperCount}</p>
-              <p className="text-xs text-blue-600">Papers Found</p>
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+            <h4 className="font-semibold text-gray-800 text-sm flex items-center gap-2">
+              📊 Analysis & Generation Breakdown
+            </h4>
+            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+              analysis.analysisMode === 'pattern'
+                ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                : analysis.analysisMode === 'hybrid'
+                ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                : 'bg-amber-100 text-amber-800 border border-amber-200'
+            }`}>
+              Mode: {
+                analysis.analysisMode === 'pattern'
+                  ? 'Historical Pattern Analysis (>10 Papers)'
+                  : analysis.analysisMode === 'hybrid'
+                  ? 'Historical + Syllabus Hybrid'
+                  : 'Syllabus Only'
+              }
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3 text-center mb-3">
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-2.5">
+              <p className="text-xl font-bold text-blue-700">{analysis.paperCount}</p>
+              <p className="text-xs text-blue-600 font-medium">Papers Found</p>
             </div>
-            <div className="bg-green-50 rounded-lg p-2">
-              <p className="text-lg font-bold text-green-700">
-                {analysis.usableExtractedPapers}
-                {analysis.ocrProcessedCount > 0 && (
-                  <span className="text-xs font-semibold text-emerald-600 block">
-                    ({analysis.ocrProcessedCount} via OCR)
-                  </span>
-                )}
-              </p>
-              <p className="text-xs text-green-600">Extracted</p>
+            <div className="bg-green-50 border border-green-100 rounded-lg p-2.5">
+              <p className="text-xl font-bold text-green-700">{analysis.usableExtractedPapers}</p>
+              <p className="text-xs text-green-600 font-medium">Extracted</p>
             </div>
-            <div className="bg-purple-50 rounded-lg p-2">
-              <p className="text-lg font-bold text-purple-700 capitalize">{analysis.analysisMode}</p>
-              <p className="text-xs text-purple-600">Mode</p>
+            <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5">
+              <p className="text-xl font-bold text-emerald-700">{analysis.ocrProcessedCount || 0}</p>
+              <p className="text-xs text-emerald-600 font-medium">OCR Processed</p>
             </div>
-            <div className="bg-amber-50 rounded-lg p-2">
-              <p className="text-lg font-bold text-amber-700">{analysis.syllabusProvided ? 'Yes' : 'No'}</p>
-              <p className="text-xs text-amber-600">Syllabus</p>
+            <div className="bg-amber-50 border border-amber-100 rounded-lg p-2.5">
+              <p className="text-xl font-bold text-amber-700">{analysis.partiallyExtractedCount || 0}</p>
+              <p className="text-xs text-amber-600 font-medium">Partial</p>
+            </div>
+            <div className="bg-red-50 border border-red-100 rounded-lg p-2.5">
+              <p className="text-xl font-bold text-red-700">{analysis.failedCount || 0}</p>
+              <p className="text-xs text-red-600 font-medium">Failed</p>
             </div>
           </div>
-          {analysis.partiallyExtractedCount > 0 && (
-            <p className="text-xs text-amber-600 mt-2">
-              ⚠️ {analysis.partiallyExtractedCount} PDF(s) were partially extracted.
-            </p>
-          )}
+
+          {/* Mode explanation message */}
+          <div className="text-xs rounded-lg p-2.5 mb-2 bg-gray-50 text-gray-700 border border-gray-200">
+            {analysis.analysisMode === 'pattern' && (
+              <p>✅ <strong>Deep Historical Analysis:</strong> Successfully analyzed recurring question styles, difficulty distributions, and technical patterns across {analysis.usableExtractedPapers} usable previous-year papers.</p>
+            )}
+            {analysis.analysisMode === 'hybrid' && (
+              <p>ℹ️ <strong>Hybrid Analysis:</strong> Generated questions based on {analysis.usableExtractedPapers} extracted previous-year question paper(s) combined with your syllabus text.</p>
+            )}
+            {analysis.analysisMode === 'syllabus' && (
+              <p className="text-amber-800">⚠️ <strong>Syllabus-Only Generation:</strong> {analysis.usableExtractedPapers === 0 ? 'Zero usable previous-year papers could be extracted.' : 'Historical paper threshold not met.'} Generated strictly from your syllabus topics without claiming historical pattern analysis.</p>
+            )}
+          </div>
+
+          {/* Failed extraction detailed reasons */}
           {analysis.extractionErrors && analysis.extractionErrors.length > 0 && (
-            <p className="text-xs text-red-500 mt-2">
-              ⚠️ {analysis.extractionErrors.length} PDF(s) could not be extracted.
-            </p>
+            <div className="mt-2.5 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+              <p className="font-semibold mb-1">⚠️ Extraction Limitations / Errors ({analysis.extractionErrors.length} file{analysis.extractionErrors.length > 1 ? 's' : ''}):</p>
+              <ul className="list-disc list-inside space-y-1">
+                {analysis.extractionErrors.map((err, idx) => (
+                  <li key={idx}>
+                    <span className="font-medium">{err.paper}:</span> {err.error || 'Could not parse text or render scanned images'}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}
