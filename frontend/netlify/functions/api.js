@@ -1215,8 +1215,8 @@ function normalizeSubjectName(name) {
 // --- AI Provider Adapters ---
 async function callGemini(apiKey, prompt) {
   const models = [
-    'gemini-3.5-flash-lite',
     'gemini-flash-lite-latest',
+    'gemini-3.5-flash-lite',
     'gemini-3.5-flash',
     'gemini-3.8-flash',
     'gemini-flash-latest',
@@ -1225,17 +1225,17 @@ async function callGemini(apiKey, prompt) {
     'gemini-1.5-flash'
   ];
   let lastError = null;
-  const deadline = Date.now() + 22000; // 22s hard deadline to prevent lambda 30s timeout
+  const deadline = Date.now() + 8500; // 8.5s hard deadline to strictly guarantee Netlify 10s compliance
 
   for (const model of models) {
     if (Date.now() >= deadline) {
-      console.warn('Approaching serverless timeout budget, aborting further model fallbacks.');
+      console.warn('Approaching serverless timeout budget, returning gracefully.');
       break;
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 4500);
 
     try {
       const response = await fetch(url, {
@@ -1244,8 +1244,8 @@ async function callGemini(apiKey, prompt) {
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 2500,
+            temperature: 0.2,
+            maxOutputTokens: 1400,
             responseMimeType: 'application/json',
           },
         }),
@@ -1788,7 +1788,8 @@ app.post('/api/papers/generate', async (req, res) => {
     });
   } catch (error) {
     console.error('Generate paper error:', error.message);
-    res.status(500).json({ message: 'An unexpected error occurred during paper generation.' });
+    const statusCode = error.message.includes('Invalid or unauthorized') ? 401 : (error.message.includes('time limit') || error.message.includes('rate limit') ? 503 : 500);
+    res.status(statusCode).json({ message: error.message || 'An unexpected error occurred during paper generation.' });
   }
 });
 
