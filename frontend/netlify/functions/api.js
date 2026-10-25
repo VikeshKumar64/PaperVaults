@@ -880,7 +880,16 @@ function extractEmbeddedPageImages(pdfBuffer) {
 // --- AI Multimodal Vision OCR (Fast, 100% accurate, zero native binary dependencies) ---
 async function ocrImageWithGemini(apiKey, imgBuffer) {
   const base64Data = imgBuffer.toString('base64');
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
+  const models = [
+    'gemini-3.8-flash',
+    'gemini-3.5-flash',
+    'gemini-flash-latest',
+    'gemini-3.5-flash-lite',
+    'gemini-flash-lite-latest',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash'
+  ];
   for (const m of models) {
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
@@ -1199,7 +1208,17 @@ function normalizeSubjectName(name) {
 
 // --- AI Provider Adapters ---
 async function callGemini(apiKey, prompt) {
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
+  const models = [
+    'gemini-3.8-flash',
+    'gemini-3.5-flash',
+    'gemini-flash-latest',
+    'gemini-3.5-flash-lite',
+    'gemini-flash-lite-latest',
+    'gemini-pro-latest',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash'
+  ];
   let lastError = null;
 
   for (const model of models) {
@@ -1223,9 +1242,6 @@ async function callGemini(apiKey, prompt) {
         if (response.status === 401 || response.status === 403) {
           throw new Error('Invalid or unauthorized Gemini API key. Please check your API key.');
         }
-        if (response.status === 429) {
-          throw new Error('Gemini API rate limit exceeded. Please wait a moment and try again.');
-        }
         lastError = new Error(`Gemini model ${model} error (${response.status}): ${errBody.substring(0, 200)}`);
         continue;
       }
@@ -1233,12 +1249,12 @@ async function callGemini(apiKey, prompt) {
       const data = await response.json();
       const textContent = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!textContent) {
-        lastError = new Error('Gemini returned an empty response. Please try again.');
+        lastError = new Error(`Gemini returned an empty response with model ${model}.`);
         continue;
       }
       return textContent;
     } catch (err) {
-      if (err.message.includes('Invalid or unauthorized') || err.message.includes('rate limit')) {
+      if (err.message.includes('Invalid or unauthorized')) {
         throw err;
       }
       lastError = err;
@@ -1535,7 +1551,7 @@ function parseAIResponse(rawText) {
 
 // @desc    Generate AI practice question paper
 // @route   POST /api/papers/generate
-app.post('/api/papers/generate', express.json({ limit: '1mb' }), async (req, res) => {
+app.post('/api/papers/generate', async (req, res) => {
   try {
     const {
       degree,
