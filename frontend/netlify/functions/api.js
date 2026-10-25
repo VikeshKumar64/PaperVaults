@@ -1235,7 +1235,7 @@ async function callGemini(apiKey, prompt) {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6500);
+    const timer = setTimeout(() => controller.abort(), 5000);
 
     try {
       const response = await fetch(url, {
@@ -1245,7 +1245,7 @@ async function callGemini(apiKey, prompt) {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: 8192,
+            maxOutputTokens: 2500,
             responseMimeType: 'application/json',
           },
         }),
@@ -1796,7 +1796,7 @@ app.post('/api/papers/generate', async (req, res) => {
 // Health Check
 // ============================================================
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'PaperVault API is running (serverless)' });
+  res.json({ status: 'ok', version: '2026-10-25-fast-pipeline', message: 'PaperVault API is running (serverless)' });
 });
 
 // ============================================================
