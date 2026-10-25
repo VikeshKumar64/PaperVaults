@@ -8,7 +8,12 @@ const apiApp = require('../../frontend/netlify/functions/api.js');
 
 async function testE2E() {
   console.log('Connecting to MongoDB Atlas...');
-  await mongoose.connect('process.env.MONGODB_URI', {
+  const mongoUri = (process.env.MONGODB_URI || '').trim();
+  if (!mongoUri) {
+    console.log('Skipping E2E test: MONGODB_URI not provided.');
+    process.exit(0);
+  }
+  await mongoose.connect(mongoUri, {
     tls: true,
     tlsAllowInvalidCertificates: true,
   });
